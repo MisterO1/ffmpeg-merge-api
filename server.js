@@ -1,55 +1,89 @@
 import express from "express";
-import ffmpeg from "fluent-ffmpeg";
 import fs from "fs";
 import fetch from "node-fetch";
-import { v4 as uuid } from "uuid";
+import ffmpeg from "fluent-ffmpeg";
+import { v4 as uuidv4 } from "uuid";
+import cors from "cors";
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
+app.use(cors());
 
+// --- MERGE AUDIO + IMAGE ---
 app.post("/merge", async (req, res) => {
   try {
-    const { audio_url, image_url } = req.body;
-    if (!audio_url || !image_url)
-      return res.status(400).json({ error: "Missing audio_url or image_url" });
+    const { audioUrl, imageUrl, duration } = req.body;
 
-    const id = uuid();
-    const audioPath = `/tmp/${id}.mp3`;
-    const imagePath = `/tmp/${id}.jpg`;
-    const outputPath = `/tmp/${id}.mp4`;
+    if (!audioUrl || !imageUrl) {
+      return res.status(400).json({ error: "audioUrl et imageUrl sont requis" });
+    }
 
-    const audioResp = await fetch(audio_url);
-    fs.writeFileSync(audioPath, Buffer.from(await audioResp.arrayBuffer()));
+    console.log("🔗 Audio URL:", audioUrl);
+    console.log("🖼️ Image URL:", imageUrl);
 
-    const imageResp = await fetch(image_url);
-    fs.writeFileSync(imagePath, Buffer.from(await imageResp.arrayBuffer()));
+    // 1️⃣ Télécharger l’audio
+    const audioPath = `/tmp/${uuidv4()}.mp3`;
+    const audioRes = await fetch(audioUrl);
+    if (!audioRes.ok) throw new Error("Impossible de télécharger l'audio");
+    const audioBuffer = await audioRes.arrayBuffer();
+    fs.writeFileSync(audioPath, Buffer.from(audioBuffer));
 
+    // 2️⃣ Télécharger l’image
+    const imagePath = `/tmp/${uuidv4()}.jpg`;
+    const imageRes = await fetch(imageUrl);
+    if (!imageRes.ok) throw new Error("Impossible de télécharger l'image");
+    const imageBuffer = await imageRes.arrayBuffer();
+    fs.writeFileSync(imagePath, Buffer.from(imageBuffer));
+
+    // 3️⃣ Définir le chemin de sortie
+    const outputPath = `/tmp/${uuidv4()}.mp4`;
+
+    console.log("🎬 Démarrage du rendu vidéo...");
+
+    // 4️⃣ FFmpeg - fusionner audio + image
     ffmpeg()
       .input(imagePath)
+      .loop(duration || 300) // durée max en secondes (par défaut 5 min)
       .input(audioPath)
-      .loop(1)
-      .outputOptions([
-        "-c:v libx264",
-        "-tune stillimage",
-        "-c:a aac",
-        "-b:a 192k",
-        "-pix_fmt yuv420p",
-        "-shortest",
-      ])
+      .videoCodec("libx264")
+      .size("1280x720")
+      .fps(30)
+      .audioCodec("aac")
+      .outputOptions(["-shortest"]) // coupe à la fin du son
       .save(outputPath)
-      .on("end", () => {
-        res.sendFile(outputPath);
-        setTimeout(() => {
+      .on("end", async () => {
+        console.log("✅ Vidéo générée :", outputPath);
+
+        // Envoyer le flux de la vidéo
+        res.setHeader("Content-Type", "video/mp4");
+        const stream = fs.createReadStream(outputPath);
+        stream.pipe(res);
+
+        // Supprimer après envoi
+        stream.on("end", () => {
           fs.unlinkSync(audioPath);
           fs.unlinkSync(imagePath);
           fs.unlinkSync(outputPath);
-        }, 10000);
+        });
+      })
+      .on("error", (err) => {
+        console.error("❌ FFmpeg error:", err.message);
+        res.status(500).json({ error: err.message });
       });
   } catch (err) {
-    console.error(err);
+    console.error("💥 Erreur serveur:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`✅ API active sur port ${port}`));
+// --- Root route ---
+app.get("/", (req, res) => {
+  res.json({
+    message: "🎵 FFmpeg Merge API en ligne",
+    usage: "POST /merge { audioUrl, imageUrl, duration }"
+  });
+});
+
+// --- Port dynamique pour Render ---
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`🚀 Serveur actif sur le port ${PORT}`));
